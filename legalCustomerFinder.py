@@ -6,22 +6,35 @@ Created on Tue Mar  7 11:47:18 2023
 """
 import sqlalchemy as sa
 import pandas as pd
+import re
 
 config = 'mssql+pyodbc://172.16.3.7/Auction?driver=SQL+Server+Native+Client+11.0'
 engine = sa.create_engine(config)
 
 # Query only the necessary columns from the database
-CustomerSpcQuery = 'SELECT cCustomerSpcId, cCustomerSpcNam, cCustomerSpcCS2ShenaseMeli, cCustomerSpcNooId FROM [Auction].[dbo].[tcCustomerSpc]'
+CustomerSpcQuery = '''
+SELECT cCustomerSpcPK, 
+       cCustomerSpcId, 
+       cCustomerSpcNam, 
+       cCustomerSpcCS2MahalSabt,
+       cCustomerSpcCS2ShomSabt,
+       cCustomerSpcCS1CodeMeli, 
+       cCustomerSpcCS2ShomHesab,
+       cCustomerSpcCS2NamBank,
+       cCustomerSpcCS2ShenaseMeli, 
+       cCustomerSpcNooId 
+FROM [Auction].[dbo].[tcCustomerSpc]
+'''
 CustomerSpc = pd.read_sql_query(CustomerSpcQuery, engine)
 
 # Create a temporary column with spaces removed to be used in comparison later
 CustomerSpc['nameChanged'] = CustomerSpc.cCustomerSpcNam.str.replace(' ', '')
 
-# Filter the dataframe to only include legal customers with no Shenase Melli ID
-legalsNoShenaseMelli = CustomerSpc[(CustomerSpc.cCustomerSpcNooId == 1) & (CustomerSpc.cCustomerSpcCS2ShenaseMeli.isna())]
+# Filter the dataframe to only include not foreign legal customers with no cCustomerSpcCS2ShenaseMeli
+legalsNoShenaseMelli = CustomerSpc[(CustomerSpc.cCustomerSpcNooId == 1) & (CustomerSpc.cCustomerSpcCS2ShenaseMeli.isna()) & (CustomerSpc.nameChanged.apply(lambda x: True if re.match(pattern='[^a-zA-Z?]+', string=x) else False))]
 
-# Filter the dataframe to only include legal customers with a valid Shenase Melli ID
-legalsWithShenaseMelli = CustomerSpc[(CustomerSpc.cCustomerSpcNooId == 1) & (~CustomerSpc.cCustomerSpcCS2ShenaseMeli.isna())]
+# Filter the dataframe to only include not foreign legal customers with a cCustomerSpcCS2ShenaseMeli
+legalsWithShenaseMelli = CustomerSpc[(CustomerSpc.cCustomerSpcNooId == 1) & (~CustomerSpc.cCustomerSpcCS2ShenaseMeli.isna()) & (CustomerSpc.nameChanged.apply(lambda x: True if re.match(pattern='[^a-zA-Z?]+', string=x) else False))]
 
 # Filter the dataframe to only include legal customers with a fake Shenase Melli ID (less than 10 characters)
 legalsWithFakeShenaseMelli = legalsWithShenaseMelli[legalsWithShenaseMelli.cCustomerSpcCS2ShenaseMeli.str.len() < 10]
@@ -31,36 +44,75 @@ legalsWithProblem = pd.concat([legalsNoShenaseMelli, legalsWithFakeShenaseMelli]
 del legalsNoShenaseMelli
 del legalsWithFakeShenaseMelli
 
-# Filter the dataframe to only include legal customers without problems
-legalsWithoutProblem = CustomerSpc[~CustomerSpc.cCustomerSpcId.isin(legalsWithProblem.cCustomerSpcId)]
+# Filter the dataframe to only include not foreign legal customers that has cCustomerSpcCS2ShenaseMeli
+legalsWithoutProblem = CustomerSpc[(~CustomerSpc.cCustomerSpcPK.isin(legalsWithProblem.cCustomerSpcPK)) & (CustomerSpc.nameChanged.apply(lambda x: True if re.match(pattern='[^a-zA-Z?]+', string=x) else False))]
 
-# Join the two dataframes to find exact matches (same name and valid Shenase Melli ID)
+# Join the two dataframes to find exact matches (same name and valid cCustomerSpcCS2ShenaseMeli)
 exactMatches = pd.merge(left=legalsWithProblem, right=legalsWithoutProblem[['nameChanged', 'cCustomerSpcCS2ShenaseMeli']], on='nameChanged', how='inner')
+exactMatches = exactMatches [(exactMatches.cCustomerSpcCS2ShenaseMeli_y != "") & (~exactMatches.cCustomerSpcCS2ShenaseMeli_y.isna())].drop_duplicates()
+exactMatchesGrouped = exactMatches.groupby('cCustomerSpcPK').first().reset_index()
+exactMatchesGrouped.rename(columns = {"cCustomerSpcCS2ShenaseMeli_y": "cCustomerSpcCS2ShenaseMeli"}, inplace = True)
 
-# Filter the dataframe to only include legal customers with problems that don't have an exact match
-legalsWithProblemNotMatched = legalsWithProblem[~legalsWithProblem.cCustomerSpcId.isin(exactMatches.cCustomerSpcId)]
+# Make the filled dataframe
+filled = exactMatchesGrouped[['cCustomerSpcPK', 'cCustomerSpcCS2ShenaseMeli']]
 
-# define function to find 5 most similar names
-def find_similar_names(name, df):
-    scores = [(jellyfish.jaro_distance(name, x), i) for i, x in enumerate(df['nameChanged'])]
-    scores = sorted(scores, reverse=True)
-    return ', '.join([str(df.iloc[i]['cCustomerSpcId']) for score, i in scores[1:6]])
+# Ommit matcheds from legalsWithProblem
+legalsWithProblem = legalsWithProblem[~legalsWithProblem.cCustomerSpcPK.isin(exactMatchesGrouped.cCustomerSpcPK)]
 
-legalsWithProblemNotMatched['similar_names'] = legalsWithProblemNotMatched.apply(lambda row: find_similar_names(row['nameChanged'], legalsWithoutProblem), axis=1)
-legalsWithProblemNotMatched['most_similar_name'] = legalsWithProblemNotMatched.similar_names.str.split(', ').str.get(0).astype(int)
+# Join the two dataframes to find exact matches (same name and valid cCustomerSpcCS1CodeMeli)
+exactMatches = pd.merge(left=legalsWithProblem, right=legalsWithoutProblem[['nameChanged', 'cCustomerSpcCS1CodeMeli']], on='nameChanged', how='inner')
+exactMatches = exactMatches [(exactMatches.cCustomerSpcCS1CodeMeli_y != "") & (~exactMatches.cCustomerSpcCS1CodeMeli_y.isna())].drop_duplicates()
+exactMatches.rename(columns = {"cCustomerSpcCS1CodeMeli_y": "cCustomerSpcCS1CodeMeli"}, inplace = True)
 
-similars = pd.merge(left = legalsWithProblemNotMatched, right = legalsWithoutProblem[['cCustomerSpcNam', 'cCustomerSpcId', 'cCustomerSpcCS2ShenaseMeli']], right_on = 'cCustomerSpcId', left_on = 'most_similar_name', how = "inner")
-similars.rename(columns = {'cCustomerSpcId_x': 'cCustomerSpcId', 'cCustomerSpcNam_x': 'cCustomerSpcNam'}, inplace=True)
-similars['matching_type'] = 'similar'
+# Add to filled dataframe
+filled = pd.concat([filled, exactMatches[['cCustomerSpcPK', 'cCustomerSpcCS2ShenaseMeli']]])
+filled['how'] = 'code/shenaseMelli'
 
-exactMatches['similar_names'] = None
-exactMatches['most_similar_name'] = None
-exactMatches['cCustomerSpcNam_y'] = None
-exactMatches['cCustomerSpcId_y'] = None
-exactMatches['matching_type'] = 'exact'
+# Ommit matches from legalsWithProblem
+legalsWithProblem = legalsWithProblem[~legalsWithProblem.cCustomerSpcPK.isin(exactMatches.cCustomerSpcPK)]
 
-exactMatches = exactMatches[list(similars.columns)]
+# Extract problematic legals from legalsWithProblem that has both cCustomerSpcCS2MahalSabt and cCustomerSpcCS2ShomSabt
+legalsWithProblemHasSabt = legalsWithProblem[(~legalsWithProblem.cCustomerSpcCS2MahalSabt.isna()) & (~legalsWithProblem.cCustomerSpcCS2ShomSabt.isna())]
 
-result = pd.concat([exactMatches, similars])
+# Filter legalsWithoutProblem based on cCustomerSpcCS2MahalSabt and cCustomerSpcCS2ShomSabt columns
+legalWithoutProblemHasSabt = legalsWithoutProblem[(~legalsWithoutProblem.cCustomerSpcCS2MahalSabt.isna()) & (~legalsWithoutProblem.cCustomerSpcCS2ShomSabt.isna())]
 
-result.to_excel(r"D:\legalSimilars.xlsx")
+# Join legalWithoutProblemHasSabt with legalsWithProblemHasSabt on the common columns
+joined_df = pd.merge(legalWithoutProblemHasSabt, legalsWithProblemHasSabt, on=['cCustomerSpcCS2MahalSabt', 'cCustomerSpcCS2ShomSabt']).groupby(['cCustomerSpcCS2MahalSabt', 'cCustomerSpcCS2ShomSabt']).first().reset_index()
+
+# Select only the columns we need
+result = joined_df[['cCustomerSpcPK_y', 'cCustomerSpcCS2ShenaseMeli_x']].rename(columns={'cCustomerSpcPK_y': 'cCustomerSpcPK', 'cCustomerSpcCS2ShenaseMeli_x': 'cCustomerSpcCS2ShenaseMeli'})
+result['how'] = 'shomare & mahale sabt'
+
+# add matched rows to filled
+filled = pd.concat([filled, result])
+
+del legalWithoutProblemHasSabt
+
+# Ommit sabt matches from legalsWithProblem
+legalsWithProblem = legalsWithProblem[~legalsWithProblem.cCustomerSpcPK.isin(result.cCustomerSpcPK)]
+
+# Extract problematic legals from legalsWithProblem that has both cCustomerSpcCS2ShomHesab and cCustomerSpcCS2NamBank
+legalsWithProblemHasBankInfo = legalsWithProblem[(~legalsWithProblem.cCustomerSpcCS2ShomHesab.isna()) & (~legalsWithProblem.cCustomerSpcCS2NamBank.isna())]
+
+# Filter legalsWithoutProblem based on cCustomerSpcCS2ShomHesab and cCustomerSpcCS2NamBank columns
+legalWithoutProblemHasBankInfo = legalsWithoutProblem[(~legalsWithoutProblem.cCustomerSpcCS2ShomHesab.isna()) & (~legalsWithoutProblem.cCustomerSpcCS2NamBank.isna())]
+
+# Join legalsWithProblemHasBankInfo with legalsWithProblemHasSabt on the common columns
+joined_df = pd.merge(legalWithoutProblemHasBankInfo, legalsWithProblemHasBankInfo, on=['cCustomerSpcCS2ShomHesab', 'cCustomerSpcCS2NamBank']).groupby(['cCustomerSpcCS2ShomHesab', 'cCustomerSpcCS2NamBank']).first().reset_index()
+
+# Select only the columns we need
+result = joined_df[['cCustomerSpcPK_y', 'cCustomerSpcCS2ShenaseMeli_x']].rename(columns={'cCustomerSpcPK_y': 'cCustomerSpcPK', 'cCustomerSpcCS2ShenaseMeli_x': 'cCustomerSpcCS2ShenaseMeli'})
+result['how'] = 'shomare & nam bank'
+
+# add matched rows to filled
+filled = pd.concat([filled, result])
+
+del legalWithoutProblemHasBankInfo
+
+# write filled to excel
+filled.to_excel(r"D:\legalSimilars.xlsx")
+
+# Ommit matcheds from legalsWithProblem and print remained problematic rows
+legalsWithProblem = legalsWithProblem[~legalsWithProblem.cCustomerSpcPK.isin(result.cCustomerSpcPK)]
+print(legalsWithProblem.shape[0])

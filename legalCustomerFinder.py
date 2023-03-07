@@ -1,40 +1,44 @@
 # -*- coding: utf-8 -*-
 """
-Created on Mon Mar  6 16:54:21 2023
+Created on Tue Mar  7 11:47:18 2023
 
 @author: sadeghi.a
 """
-# -*- coding: utf-8 -*-
-
 import sqlalchemy as sa
 import pandas as pd
-import jellyfish
 
 config = 'mssql+pyodbc://172.16.3.7/Auction?driver=SQL+Server+Native+Client+11.0'
 engine = sa.create_engine(config)
 
-CustomerSpcQuery = 'Select * from [Auction].[dbo].[tcCustomerSpc]'
+# Query only the necessary columns from the database
+CustomerSpcQuery = 'SELECT cCustomerSpcId, cCustomerSpcNam, cCustomerSpcCS2ShenaseMeli, cCustomerSpcNooId FROM [Auction].[dbo].[tcCustomerSpc]'
 CustomerSpc = pd.read_sql_query(CustomerSpcQuery, engine)
-CustomerSpc['nameChanged'] = [name.replace(' ', '') for name in CustomerSpc.cCustomerSpcNam]
 
-legals = CustomerSpc[CustomerSpc.cCustomerSpcNooId == 1]
-noShenaseMelliFilter = legals.cCustomerSpcCS2ShenaseMeli.isna()
-legalsNoShenaseMelli = legals[noShenaseMelliFilter]
+# Create a temporary column with spaces removed to be used in comparison later
+CustomerSpc['nameChanged'] = CustomerSpc.cCustomerSpcNam.str.replace(' ', '')
 
-hasShenaseMelliFilter = legals.cCustomerSpcId.isin(legalsNoShenaseMelli.cCustomerSpcId) == False
-legalsWithShenaseMelli = legals[hasShenaseMelliFilter]
+# Filter the dataframe to only include legal customers with no Shenase Melli ID
+legalsNoShenaseMelli = CustomerSpc[(CustomerSpc.cCustomerSpcNooId == 1) & (CustomerSpc.cCustomerSpcCS2ShenaseMeli.isna())]
 
-fakeShenaseMelliFilter = legalsWithShenaseMelli.cCustomerSpcCS2ShenaseMeli.apply(lambda x: len(x) < 10)
-legalsWithFakeShenaseMelli = legalsWithShenaseMelli[fakeShenaseMelliFilter]
+# Filter the dataframe to only include legal customers with a valid Shenase Melli ID
+legalsWithShenaseMelli = CustomerSpc[(CustomerSpc.cCustomerSpcNooId == 1) & (~CustomerSpc.cCustomerSpcCS2ShenaseMeli.isna())]
 
+# Filter the dataframe to only include legal customers with a fake Shenase Melli ID (less than 10 characters)
+legalsWithFakeShenaseMelli = legalsWithShenaseMelli[legalsWithShenaseMelli.cCustomerSpcCS2ShenaseMeli.str.len() < 10]
+
+# Combine the two dataframes of legal customers with problems (no Shenase Melli or fake Shenase Melli)
 legalsWithProblem = pd.concat([legalsNoShenaseMelli, legalsWithFakeShenaseMelli])
+del legalsNoShenaseMelli
+del legalsWithFakeShenaseMelli
 
-legalsWithoutProblemFilter = legals.cCustomerSpcId.isin(legalsWithProblem.cCustomerSpcId) == False
-legalsWithoutProblem = legals[legalsWithoutProblemFilter]
+# Filter the dataframe to only include legal customers without problems
+legalsWithoutProblem = CustomerSpc[~CustomerSpc.cCustomerSpcId.isin(legalsWithProblem.cCustomerSpcId)]
 
-exactMatches = pd.merge(left = legalsWithProblem, right = legalsWithoutProblem[['nameChanged', 'cCustomerSpcCS2ShenaseMeli']], on = 'nameChanged', how = "inner")
-legalsWithProblemNotMatchedFilter = legalsWithProblem.cCustomerSpcId.isin(exactMatches.cCustomerSpcId) == False
-legalsWithProblemNotMatched = legalsWithProblem[legalsWithProblemNotMatchedFilter]
+# Join the two dataframes to find exact matches (same name and valid Shenase Melli ID)
+exactMatches = pd.merge(left=legalsWithProblem, right=legalsWithoutProblem[['nameChanged', 'cCustomerSpcCS2ShenaseMeli']], on='nameChanged', how='inner')
+
+# Filter the dataframe to only include legal customers with problems that don't have an exact match
+legalsWithProblemNotMatched = legalsWithProblem[~legalsWithProblem.cCustomerSpcId.isin(exactMatches.cCustomerSpcId)]
 
 # define function to find 5 most similar names
 def find_similar_names(name, df):
